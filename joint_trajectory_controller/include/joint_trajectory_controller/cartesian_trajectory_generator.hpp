@@ -67,9 +67,6 @@ protected:
   rclcpp::Subscription<ControllerFeedbackMsg>::SharedPtr feedback_subscriber_ = nullptr;
   realtime_tools::RealtimeBuffer<std::shared_ptr<ControllerFeedbackMsg>> feedback_;
 
-  rclcpp::Service<ControllerModeSrvType>::SharedPtr reset_axes_service_;
-  std::unordered_map<std::string, realtime_tools::RealtimeBuffer<bool>> use_position_input_;
-
   rclcpp::Service<SetLimitsModeSrvType>::SharedPtr set_joint_limits_service_;
 
 private:
