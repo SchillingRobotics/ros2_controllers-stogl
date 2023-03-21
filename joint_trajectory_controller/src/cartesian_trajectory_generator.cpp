@@ -230,14 +230,13 @@ void CartesianTrajectoryGenerator::set_joint_limits_service_callback(
     if (std::isnan(request_limit_value))
     {
       new_limit_value = configured_limit_value;
-      new_limit_has_limits = !std::isnan(configured_limit_value);
     }
     // new limit is requested
     else
     {
       new_limit_value = request_limit_value;
-      new_limit_has_limits = true;
     }
+    new_limit_has_limits = !std::isnan(new_limit_value);
   };
 
   // lambda for setting new position limits
