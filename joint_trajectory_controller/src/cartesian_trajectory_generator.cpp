@@ -182,7 +182,8 @@ void CartesianTrajectoryGenerator::reference_callback(
     new_traj_msg->points[0].velocities[index] = vel_from_msg;
     if (std::isnan(pos_from_msg) && std::isnan(vel_from_msg))
     {
-      RCLCPP_DEBUG(get_node()->get_logger(), "Input position and velocity is NaN");
+      RCLCPP_DEBUG(
+        get_node()->get_logger(), "Input position and velocity for %s is NaN", joint_name.c_str());
     }
   };
 
