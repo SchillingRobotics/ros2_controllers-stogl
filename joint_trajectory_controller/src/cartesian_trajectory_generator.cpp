@@ -112,12 +112,6 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
   // store joint limits for later
   configured_joint_limits_ = joint_limits_;
 
-  // set all position per default to not use positions
-  for (const auto & joint_name : command_joint_names_)
-  {
-    use_position_input_[joint_name] = realtime_tools::RealtimeBuffer(false);
-  }
-
   // topics QoS
   auto subscribers_qos = rclcpp::SystemDefaultsQoS();
   subscribers_qos.keep_last(1);
@@ -147,71 +141,6 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
   services_qos.keep_all();
   services_qos.reliable();
   services_qos.durability_volatile();
-
-  // Control mode service
-  auto reset_axes_service_callback =
-    [&](
-      const std::shared_ptr<ControllerModeSrvType::Request> request,
-      std::shared_ptr<ControllerModeSrvType::Response> response) {
-      response->ok = true;
-      for (size_t i = 0; i < request->names.size(); ++i)
-      {
-        auto it =
-          std::find(command_joint_names_.begin(), command_joint_names_.end(), request->names[i]);
-        if (it != command_joint_names_.end())
-        {
-          use_position_input_[request->names[i]].writeFromNonRT(true);
-          RCLCPP_INFO(
-            get_node()->get_logger(), "Enabling position mode on dof '%s'.",
-            request->names[i].c_str());
-          // TODO(destogl): use RealtimeBox or similar with readFromNonRT
-          // reset data in the last reference to read values from feedback
-          auto current_ref = *(input_ref_.readFromRT());
-          auto cmd_itf_index = std::distance(command_joint_names_.begin(), it);
-          if (cmd_itf_index == 0)
-          {
-            current_ref->transforms[0].translation.x = std::numeric_limits<double>::quiet_NaN();
-            current_ref->velocities[0].linear.x = std::numeric_limits<double>::quiet_NaN();
-          }
-          if (cmd_itf_index == 1)
-          {
-            current_ref->transforms[0].translation.y = std::numeric_limits<double>::quiet_NaN();
-            current_ref->velocities[0].linear.y = std::numeric_limits<double>::quiet_NaN();
-          }
-          if (cmd_itf_index == 2)
-          {
-            current_ref->transforms[0].translation.z = std::numeric_limits<double>::quiet_NaN();
-            current_ref->velocities[0].linear.z = std::numeric_limits<double>::quiet_NaN();
-          }
-          if (cmd_itf_index == 3)
-          {
-            current_ref->transforms[0].rotation.x = std::numeric_limits<double>::quiet_NaN();
-            current_ref->velocities[0].angular.x = std::numeric_limits<double>::quiet_NaN();
-          }
-          if (cmd_itf_index == 4)
-          {
-            current_ref->transforms[0].rotation.y = std::numeric_limits<double>::quiet_NaN();
-            current_ref->velocities[0].angular.y = std::numeric_limits<double>::quiet_NaN();
-          }
-          if (cmd_itf_index == 5)
-          {
-            current_ref->transforms[0].rotation.z = std::numeric_limits<double>::quiet_NaN();
-            current_ref->velocities[0].angular.z = std::numeric_limits<double>::quiet_NaN();
-          }
-          reference_callback(current_ref);
-        }
-        else
-        {
-          RCLCPP_WARN(
-            get_node()->get_logger(), "Name '%s' is not command interface. Ignoring this entry.",
-            request->names[i].c_str());
-          response->ok = false;
-        }
-      }
-    };
-
-  reset_axes_service_ = get_node()->create_service<ControllerModeSrvType>(
-    "~/reset_axes", reset_axes_service_callback, services_qos);
 
   // Control mode service
   auto set_joint_limits_service_callback =
@@ -315,61 +244,31 @@ void CartesianTrajectoryGenerator::reference_callback(
     joint_names_.size(), std::numeric_limits<double>::quiet_NaN());
   new_traj_msg->points[0].time_from_start = rclcpp::Duration::from_seconds(0.01);
 
-  // check all axes for "type" of messages coming in. If there are velocity values in a filed then
-  // we switch away from position mode and set position to NaN
-  auto assign_value_depending_on_input = [&](
-                                           const double pos_from_msg, const double vel_from_msg,
-                                           const std::string & joint_name, const size_t index,
-                                           const double pos_feedback) {
-    if (!std::isnan(vel_from_msg))
+  // just pass input into trajectory message
+  auto assign_value_from_input = [&](
+                                   const double pos_from_msg, const double vel_from_msg,
+                                   const std::string & joint_name, const size_t index)
+  {
+    new_traj_msg->points[0].positions[index] = pos_from_msg;
+    new_traj_msg->points[0].velocities[index] = vel_from_msg;
+    if (std::isnan(pos_from_msg) && std::isnan(vel_from_msg))
     {
-      if (*(use_position_input_[joint_name].readFromNonRT()))
-      {
-        RCLCPP_INFO(
-          get_node()->get_logger(), "Disabling position mode on dof '%s'.", joint_name.c_str());
-      }
-      use_position_input_[joint_name].writeFromNonRT(false);
-      new_traj_msg->points[0].velocities[index] = vel_from_msg;
-    }
-    else if (*(use_position_input_[joint_name].readFromNonRT()))
-    {
-      if (!std::isnan(pos_from_msg))
-      {
-        new_traj_msg->points[0].positions[index] = pos_from_msg;
-        new_traj_msg->points[0].velocities[index] = 0.0;
-      }
-      else
-      {
-        new_traj_msg->points[0].positions[index] = pos_feedback;
-        new_traj_msg->points[0].velocities[index] = 0.0;
-      }
-    }
-    else
-    {
-      RCLCPP_DEBUG(
-        get_node()->get_logger(),
-        "Input velocity is NaN, but not using position mode. Ignoring input message.");
+      RCLCPP_DEBUG(get_node()->get_logger(), "Input position and velocity is NaN");
     }
   };
 
-  assign_value_depending_on_input(
-    msg->transforms[0].translation.x, msg->velocities[0].linear.x, joint_names_[0], 0,
-    state.positions[0]);
-  assign_value_depending_on_input(
-    msg->transforms[0].translation.y, msg->velocities[0].linear.y, joint_names_[1], 1,
-    state.positions[1]);
-  assign_value_depending_on_input(
-    msg->transforms[0].translation.z, msg->velocities[0].linear.z, joint_names_[2], 2,
-    state.positions[2]);
-  assign_value_depending_on_input(
-    msg->transforms[0].rotation.x, msg->velocities[0].angular.x, joint_names_[3], 3,
-    state.positions[3]);
-  assign_value_depending_on_input(
-    msg->transforms[0].rotation.y, msg->velocities[0].angular.y, joint_names_[4], 4,
-    state.positions[4]);
-  assign_value_depending_on_input(
-    msg->transforms[0].rotation.z, msg->velocities[0].angular.z, joint_names_[5], 5,
-    state.positions[5]);
+  assign_value_from_input(
+    msg->transforms[0].translation.x, msg->velocities[0].linear.x, joint_names_[0], 0);
+  assign_value_from_input(
+    msg->transforms[0].translation.y, msg->velocities[0].linear.y, joint_names_[1], 1);
+  assign_value_from_input(
+    msg->transforms[0].translation.z, msg->velocities[0].linear.z, joint_names_[2], 2);
+  assign_value_from_input(
+    msg->transforms[0].rotation.x, msg->velocities[0].angular.x, joint_names_[3], 3);
+  assign_value_from_input(
+    msg->transforms[0].rotation.y, msg->velocities[0].angular.y, joint_names_[4], 4);
+  assign_value_from_input(
+    msg->transforms[0].rotation.z, msg->velocities[0].angular.z, joint_names_[5], 5);
 
   add_new_trajectory_msg(new_traj_msg);
 }
