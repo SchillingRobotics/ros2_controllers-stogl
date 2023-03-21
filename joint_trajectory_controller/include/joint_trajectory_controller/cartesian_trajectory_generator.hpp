@@ -72,6 +72,10 @@ protected:
 private:
   void reference_callback(const std::shared_ptr<ControllerReferenceMsg> msg);
 
+  void set_joint_limits_service_callback(
+    const std::shared_ptr<SetLimitsModeSrvType::Request> request,
+    std::shared_ptr<SetLimitsModeSrvType::Response> response);
+
   std::vector<joint_limits::JointLimits> configured_joint_limits_;
 };
 
