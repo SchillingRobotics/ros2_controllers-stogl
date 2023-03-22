@@ -116,10 +116,16 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
   auto subscribers_qos = rclcpp::SystemDefaultsQoS();
   subscribers_qos.keep_last(1);
   subscribers_qos.best_effort();
+  auto subscribers_reliable_qos = rclcpp::SystemDefaultsQoS();
+  subscribers_reliable_qos.keep_all();
+  subscribers_reliable_qos.reliable();
 
-  // Reference Subscriber
+  // Reference Subscribers (reliable channel also for updates not to be missed)
   ref_subscriber_ = get_node()->create_subscription<ControllerReferenceMsg>(
     "~/reference", subscribers_qos,
+    std::bind(&CartesianTrajectoryGenerator::reference_callback, this, std::placeholders::_1));
+  ref_subscriber_reliable_ = get_node()->create_subscription<ControllerReferenceMsg>(
+    "~/reference_reliable", subscribers_qos,
     std::bind(&CartesianTrajectoryGenerator::reference_callback, this, std::placeholders::_1));
 
   std::shared_ptr<ControllerReferenceMsg> msg = std::make_shared<ControllerReferenceMsg>();
