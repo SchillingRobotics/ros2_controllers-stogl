@@ -262,7 +262,7 @@ protected:
     const rclcpp::Time & time, const JointTrajectoryPoint & desired_state,
     const JointTrajectoryPoint & current_state, const JointTrajectoryPoint & state_error);
 
-  virtual void read_state_from_hardware(JointTrajectoryPoint & state);
+  virtual bool read_state_from_hardware(JointTrajectoryPoint & state);
 
   bool read_state_from_command_interfaces(JointTrajectoryPoint & state);
 

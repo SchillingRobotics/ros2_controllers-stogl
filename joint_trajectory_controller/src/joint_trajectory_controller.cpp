@@ -165,9 +165,9 @@ controller_interface::return_type JointTrajectoryController::update(
     }
   };
 
-  // current state update
+  // current state update - bail if can't read hardware state
   state_current_.time_from_start.set__sec(0);
-  read_state_from_hardware(state_current_);
+  if (!read_state_from_hardware(state_current_)) return controller_interface::return_type::OK;
 
   // currently carrying out a trajectory
   if (traj_point_active_ptr_ && (*traj_point_active_ptr_)->has_trajectory_msg())
@@ -379,7 +379,7 @@ controller_interface::return_type JointTrajectoryController::update(
   return controller_interface::return_type::OK;
 }
 
-void JointTrajectoryController::read_state_from_hardware(JointTrajectoryPoint & state)
+bool JointTrajectoryController::read_state_from_hardware(JointTrajectoryPoint & state)
 {
   auto assign_point_from_interface =
     [&](std::vector<double> & trajectory_point_interface, const auto & joint_interface)
@@ -414,6 +414,7 @@ void JointTrajectoryController::read_state_from_hardware(JointTrajectoryPoint & 
     state.velocities.clear();
     state.accelerations.clear();
   }
+  return true;
 }
 
 bool JointTrajectoryController::read_state_from_command_interfaces(JointTrajectoryPoint & state)
@@ -876,13 +877,15 @@ controller_interface::CallbackReturn JointTrajectoryController::on_activate(
   traj_point_active_ptr_ = &traj_external_point_ptr_;
 
   // Initialize current state storage if hardware state has tracking offset
-  read_state_from_hardware(state_current_);
-  read_state_from_hardware(state_desired_);
-  read_state_from_hardware(last_commanded_state_);
-  // Handle restart of controller by reading from commands if
-  // those are not nan
   trajectory_msgs::msg::JointTrajectoryPoint state;
   resize_joint_trajectory_point(state, dof_);
+  if (!read_state_from_hardware(state)) return CallbackReturn::ERROR;
+  state_current_ = state;
+  state_desired_ = state;
+  last_commanded_state_ = state;
+
+  // Handle restart of controller by reading from commands if
+  // those are not nan
   if (read_state_from_command_interfaces(state))
   {
     state_current_ = state;
