@@ -17,6 +17,8 @@
 #include "tf2/transform_datatypes.h"
 
 #include "controller_interface/helpers.hpp"
+#include "geometry_msgs/msg/quaternion.hpp"
+#include "geometry_msgs/msg/vector3.hpp"
 #include "joint_trajectory_controller/trajectory.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 
@@ -59,6 +61,26 @@ void reset_controller_reference_msg(const std::shared_ptr<ControllerReferenceMsg
 {
   reset_controller_reference_msg(*msg);
 }
+
+void quaternion_to_rpy(
+  const geometry_msgs::msg::Quaternion & quaternion_msg, std::array<double, 3> & orientation_angles)
+{
+  // convert quaternion to euler angles
+  tf2::Quaternion quaternion;
+  tf2::fromMsg(quaternion_msg, quaternion);
+  tf2::Matrix3x3 m(quaternion);
+  m.getRPY(orientation_angles[0], orientation_angles[1], orientation_angles[2]);
+}
+
+void rpy_to_quaternion(
+  std::array<double, 3> & orientation_angles, geometry_msgs::msg::Quaternion & quaternion_msg)
+{
+  // convert quaternion to euler angles
+  tf2::Quaternion quaternion;
+  quaternion.setRPY(orientation_angles[0], orientation_angles[1], orientation_angles[2]);
+  quaternion_msg = tf2::toMsg(quaternion);
+}
+
 }  // namespace
 
 namespace cartesian_trajectory_generator
@@ -76,6 +98,23 @@ CartesianTrajectoryGenerator::state_interface_configuration() const
   return conf;
 }
 
+controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_init()
+{
+  try
+  {
+    // Create the parameter listener and get the parameters
+    ctg_param_listener_ = std::make_shared<ParamListener>(get_node());
+    ctg_params_ = ctg_param_listener_->get_params();
+  }
+  catch (const std::exception & e)
+  {
+    fprintf(stderr, "Exception thrown during init stage with message: %s \n", e.what());
+    return CallbackReturn::ERROR;
+  }
+
+  return joint_trajectory_controller::JointTrajectoryController::on_init();
+}
+
 controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
   const rclcpp_lifecycle::State & previous_state)
 {
@@ -85,8 +124,16 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
     return ret;
   }
 
+  // update the dynamic map parameters
+  ctg_param_listener_->refresh_dynamic_parameters();
+  // get parameters from the listener in case they were updated
+  ctg_params_ = ctg_param_listener_->get_params();
+
   // store joint limits for later
   configured_joint_limits_ = joint_limits_;
+
+  p_tf_Buffer_.reset(new tf2_ros::Buffer(get_node()->get_clock()));
+  p_tf_Listener_.reset(new tf2_ros::TransformListener(*p_tf_Buffer_.get(), true));
 
   // topics QoS
   auto subscribers_qos = rclcpp::SystemDefaultsQoS();
@@ -106,7 +153,8 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
 
   std::shared_ptr<ControllerReferenceMsg> msg = std::make_shared<ControllerReferenceMsg>();
   reset_controller_reference_msg(msg);
-  input_ref_.writeFromNonRT(msg);
+  reference_world_.writeFromNonRT(msg);
+  reference_local_.writeFromNonRT(msg);
 
   // Odometry feedback
   auto feedback_callback = [&](const std::shared_ptr<ControllerFeedbackMsg> msg) -> void
@@ -129,6 +177,32 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
       std::placeholders::_2),
     services_qos);
 
+  cart_publisher_ = get_node()->create_publisher<CartControllerStateMsg>(
+    "~/controller_state_cartesian", rclcpp::SystemDefaultsQoS());
+  cart_state_publisher_ = std::make_unique<CartStatePublisher>(cart_publisher_);
+
+  cart_state_publisher_->lock();
+  cart_state_publisher_->msg_.dof_names = params_.joints;
+  cart_state_publisher_->msg_.reference_world.transforms.resize(1);
+  cart_state_publisher_->msg_.reference_world.velocities.resize(1);
+  cart_state_publisher_->msg_.reference_world.accelerations.resize(1);
+  cart_state_publisher_->msg_.reference_local.transforms.resize(1);
+  cart_state_publisher_->msg_.reference_local.velocities.resize(1);
+  cart_state_publisher_->msg_.reference_local.accelerations.resize(1);
+  cart_state_publisher_->msg_.feedback.transforms.resize(1);
+  cart_state_publisher_->msg_.feedback.velocities.resize(1);
+  cart_state_publisher_->msg_.feedback.accelerations.resize(1);
+  cart_state_publisher_->msg_.error.transforms.resize(1);
+  cart_state_publisher_->msg_.error.velocities.resize(1);
+  cart_state_publisher_->msg_.error.accelerations.resize(1);
+  cart_state_publisher_->msg_.output_world.transforms.resize(1);
+  cart_state_publisher_->msg_.output_world.velocities.resize(1);
+  cart_state_publisher_->msg_.output_world.accelerations.resize(1);
+  cart_state_publisher_->msg_.output_local.transforms.resize(1);
+  cart_state_publisher_->msg_.output_local.velocities.resize(1);
+  cart_state_publisher_->msg_.output_local.accelerations.resize(1);
+  cart_state_publisher_->unlock();
+
   return CallbackReturn::SUCCESS;
 }
 
@@ -136,7 +210,7 @@ void CartesianTrajectoryGenerator::reference_callback(
   const std::shared_ptr<ControllerReferenceMsg> msg)
 {
   // store input ref for later use
-  input_ref_.writeFromNonRT(msg);
+  reference_world_.writeFromNonRT(msg);
 
   // assume for now that we are working with trajectories with one point - we don't know exactly
   // where we are in the trajectory before sampling - nevertheless this should work for the use case
@@ -162,6 +236,55 @@ void CartesianTrajectoryGenerator::reference_callback(
         get_node()->get_logger(), "Input position and velocity for %s is NaN", joint_name.c_str());
     }
   };
+
+  std::array<double, 3> orientation_angles = {
+    msg->transforms[0].rotation.x, msg->transforms[0].rotation.y, msg->transforms[0].rotation.z};
+  // Convert translation also into local frame if velocity is used in local frame
+  if (ctg_params_.velocity_in_local_frame)
+  {
+    // // first store current state
+    // const auto measured_state = *(feedback_.readFromRT());
+    // if (!measured_state)
+    // {
+    //   return false;
+    // }
+    // last_received_measured_position_ = measured_state->pose.pose;
+
+    // The logic here is:
+    // 1. get current transformations between world and command and vice-versa
+    // 2. store the transformation between world and command frame
+    // 3. get the target position in the command frame (from world frame)
+
+    // Get current transformation
+    try
+    {
+      transform_world_to_command_on_reference_receive_ = p_tf_Buffer_->lookupTransform(
+        ctg_params_.command_frame_id, ctg_params_.world_frame_id, rclcpp::Time());
+      transform_command_to_world_on_reference_receive_ = p_tf_Buffer_->lookupTransform(
+        ctg_params_.world_frame_id, ctg_params_.command_frame_id, rclcpp::Time());
+    }
+    catch (const tf2::TransformException & ex)
+    {
+      RCLCPP_ERROR_SKIPFIRST_THROTTLE(
+        get_node()->get_logger(), *(get_node()->get_clock()), 5000, "%s", ex.what());
+    }
+    // transform from world to command frame
+    tf2::doTransform(
+      msg->transforms[0].translation, msg->transforms[0].translation,
+      transform_world_to_command_on_reference_receive_);
+
+    geometry_msgs::msg::Quaternion quaternion_world, quaternion_command;
+    rpy_to_quaternion(orientation_angles, quaternion_world);
+    tf2::doTransform(
+      quaternion_world, quaternion_command, transform_world_to_command_on_reference_receive_);
+    quaternion_to_rpy(quaternion_command, orientation_angles);
+
+    msg->transforms[0].rotation.x = orientation_angles[0];
+    msg->transforms[0].rotation.y = orientation_angles[1];
+    msg->transforms[0].rotation.z = orientation_angles[2];
+
+    reference_local_.writeFromNonRT(msg);
+  }
 
   assign_value_from_input(
     msg->transforms[0].translation.x, msg->velocities[0].linear.x, params_.joints[0], 0);
@@ -355,7 +478,10 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_activate(
   // Initialize current state storage if hardware state has tracking offset
   trajectory_msgs::msg::JointTrajectoryPoint state;
   resize_joint_trajectory_point(state, dof_);
-  if (!read_state_from_hardware(state)) return CallbackReturn::ERROR;
+  if (!read_state_from_hardware(state))
+  {
+    return CallbackReturn::ERROR;
+  }
   state_current_ = state;
   state_desired_ = state;
   last_commanded_state_ = state;
@@ -373,22 +499,33 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_activate(
 
 bool CartesianTrajectoryGenerator::read_state_from_hardware(JointTrajectoryPoint & state)
 {
-  std::array<double, 3> orientation_angles;
   const auto measured_state = *(feedback_.readFromRT());
-  if (!measured_state) return false;
-  tf2::Quaternion measured_q;
-  tf2::fromMsg(measured_state->pose.pose.orientation, measured_q);
-  tf2::Matrix3x3 m(measured_q);
-  m.getRPY(orientation_angles[0], orientation_angles[1], orientation_angles[2]);
+  if (!measured_state)
+  {
+    return false;
+  }
 
-  // Assign values from the hardware
-  // Position states always exist
-  state.positions[0] = measured_state->pose.pose.position.x;
-  state.positions[1] = measured_state->pose.pose.position.y;
-  state.positions[2] = measured_state->pose.pose.position.z;
-  state.positions[3] = orientation_angles[0];
-  state.positions[4] = orientation_angles[1];
-  state.positions[5] = orientation_angles[2];
+  // if velocity used in local frame then convert position in the local frame
+  // NOTE: this is tested only in open-loop mode!
+  if (ctg_params_.velocity_in_local_frame)
+  {
+    state.positions.resize(6, 0.0);
+  }
+  else
+  {
+    // convert quaterion to euler angles
+    std::array<double, 3> orientation_angles;
+    quaternion_to_rpy(measured_state->pose.pose.orientation, orientation_angles);
+
+    // Assign values from the hardware
+    // Position states always exist
+    state.positions[0] = measured_state->pose.pose.position.x;
+    state.positions[1] = measured_state->pose.pose.position.y;
+    state.positions[2] = measured_state->pose.pose.position.z;
+    state.positions[3] = orientation_angles[0];
+    state.positions[4] = orientation_angles[1];
+    state.positions[5] = orientation_angles[2];
+  }
 
   state.velocities[0] = measured_state->twist.twist.linear.x;
   state.velocities[1] = measured_state->twist.twist.linear.y;
@@ -400,6 +537,118 @@ bool CartesianTrajectoryGenerator::read_state_from_hardware(JointTrajectoryPoint
   state.accelerations.clear();
   return true;
 }
+
+void CartesianTrajectoryGenerator::write_command_to_hardware(const uint64_t /*period_in_ns*/)
+{
+  // reset position in the last commanded state to be read for trajectory replacement (L214 in JTC)
+  last_commanded_state_.positions.resize(dof_, 0.0);
+
+  control_output_local_ = state_desired_;
+
+  // set values for next hardware write()
+  if (has_position_command_interface_)
+  {
+    if (ctg_params_.velocity_in_local_frame)
+    {
+      // The logic here is:
+      // Assumptions:
+      // - Interpolated position is in local frame
+      // - position is relative movement from the "command to world transformation" since the last
+      //     command is received
+
+      // transform from command into global frame
+      geometry_msgs::msg::Vector3 translation;
+      translation.x = state_desired_.positions[0];
+      translation.y = state_desired_.positions[1];
+      translation.z = state_desired_.positions[2];
+      tf2::doTransform(translation, translation, transform_command_to_world_on_reference_receive_);
+
+      std::array<double, 3> orientation_angles = {
+        state_desired_.positions[3], state_desired_.positions[4], state_desired_.positions[5]};
+      geometry_msgs::msg::Quaternion quaternion_world, quaternion_command;
+      rpy_to_quaternion(orientation_angles, quaternion_command);
+      tf2::doTransform(
+        quaternion_command, quaternion_world, transform_command_to_world_on_reference_receive_);
+      quaternion_to_rpy(quaternion_world, orientation_angles);
+
+      state_desired_.positions = {translation.x,         translation.y,
+                                  translation.z,         orientation_angles[0],
+                                  orientation_angles[1], orientation_angles[2]};
+    }
+    assign_interface_from_point(joint_command_interface_[0], state_desired_.positions);
+  }
+  if (has_velocity_command_interface_)
+  {
+    assign_interface_from_point(joint_command_interface_[1], state_desired_.velocities);
+  }
+  if (has_acceleration_command_interface_)
+  {
+    assign_interface_from_point(joint_command_interface_[2], state_desired_.accelerations);
+  }
+}
+
+void CartesianTrajectoryGenerator::publish_state(
+  const rclcpp::Time & time, const JointTrajectoryPoint & desired_state,
+  const JointTrajectoryPoint & current_state, const JointTrajectoryPoint & state_error,
+  const JointTrajectoryPoint & splines_output, const JointTrajectoryPoint & ruckig_input_target,
+  const JointTrajectoryPoint & ruckig_input)
+{
+  joint_trajectory_controller::JointTrajectoryController::publish_state(
+    time, desired_state, current_state, state_error, splines_output, ruckig_input_target,
+    ruckig_input);
+
+  if (cart_state_publisher_->trylock())
+  {
+    cart_state_publisher_->msg_.header.stamp = time;
+    cart_state_publisher_->msg_.reference_world = *(*reference_world_.readFromRT());
+    cart_state_publisher_->msg_.reference_local = *(*reference_local_.readFromRT());
+
+    auto set_multi_dof_point =
+      [&](
+        trajectory_msgs::msg::MultiDOFJointTrajectoryPoint & multi_dof_point,
+        const JointTrajectoryPoint & traj_point)
+    {
+      if (traj_point.positions.size() == 6)
+      {
+        multi_dof_point.transforms[0].translation.x = traj_point.positions[0];
+        multi_dof_point.transforms[0].translation.y = traj_point.positions[1];
+        multi_dof_point.transforms[0].translation.z = traj_point.positions[2];
+
+        std::array<double, 3> orientation_angles = {
+          traj_point.positions[3], traj_point.positions[4], traj_point.positions[5]};
+        geometry_msgs::msg::Quaternion quaternion;
+        rpy_to_quaternion(orientation_angles, quaternion);
+        multi_dof_point.transforms[0].rotation = quaternion;
+      }
+      if (traj_point.velocities.size() == 6)
+      {
+        multi_dof_point.velocities[0].linear.x = traj_point.velocities[0];
+        multi_dof_point.velocities[0].linear.y = traj_point.velocities[1];
+        multi_dof_point.velocities[0].linear.z = traj_point.velocities[2];
+        multi_dof_point.velocities[0].angular.x = traj_point.velocities[3];
+        multi_dof_point.velocities[0].angular.y = traj_point.velocities[4];
+        multi_dof_point.velocities[0].angular.z = traj_point.velocities[5];
+      }
+      if (traj_point.accelerations.size() == 6)
+      {
+        multi_dof_point.accelerations[0].linear.x = traj_point.accelerations[0];
+        multi_dof_point.accelerations[0].linear.y = traj_point.accelerations[1];
+        multi_dof_point.accelerations[0].linear.z = traj_point.accelerations[2];
+        multi_dof_point.accelerations[0].angular.x = traj_point.accelerations[3];
+        multi_dof_point.accelerations[0].angular.y = traj_point.accelerations[4];
+        multi_dof_point.accelerations[0].angular.z = traj_point.accelerations[5];
+      }
+    };
+
+    set_multi_dof_point(cart_state_publisher_->msg_.feedback, current_state);
+    set_multi_dof_point(cart_state_publisher_->msg_.error, state_error);
+    set_multi_dof_point(cart_state_publisher_->msg_.output_world, desired_state);
+    set_multi_dof_point(cart_state_publisher_->msg_.output_local, control_output_local_);
+
+    cart_state_publisher_->unlockAndPublish();
+  }
+}
+
 }  // namespace cartesian_trajectory_generator
 
 #include "pluginlib/class_list_macros.hpp"

@@ -163,17 +163,6 @@ controller_interface::return_type JointTrajectoryController::update(
     traj_external_point_ptr_->update(*new_external_msg, joint_limits_, period);
   }
 
-  // TODO(anyone): can I here also use const on joint_interface since the reference_wrapper is not
-  // changed, but its value only?
-  auto assign_interface_from_point =
-    [&](auto & joint_interface, const std::vector<double> & trajectory_point_interface)
-  {
-    for (size_t index = 0; index < dof_; ++index)
-    {
-      joint_interface[index].get().set_value(trajectory_point_interface[index]);
-    }
-  };
-
   // current state update - bail if can't read hardware state
   state_current_.time_from_start.set__sec(0);
   if (!read_state_from_hardware(state_current_)) return controller_interface::return_type::OK;
@@ -276,52 +265,9 @@ controller_interface::return_type JointTrajectoryController::update(
       // set values for next hardware write() if tolerance is met
       if (!tolerance_violated_while_moving && within_goal_time)
       {
-        if (use_closed_loop_pid_adapter_)
-        {
-          // Update PIDs
-          for (auto i = 0ul; i < dof_; ++i)
-          {
-            tmp_command_[i] = (state_desired_.velocities[i] * ff_velocity_scale_[i]) +
-                              pids_[i]->computeCommand(
-                                state_error_.positions[i], state_error_.velocities[i],
-                                (uint64_t)period.nanoseconds());
-          }
-        }
+        last_commanded_state_ = state_desired_;  // store the previous command (open-loop mode)
 
-        // set values for next hardware write()
-        if (has_position_command_interface_)
-        {
-          assign_interface_from_point(joint_command_interface_[0], state_desired_.positions);
-        }
-        if (has_velocity_command_interface_)
-        {
-          if (use_closed_loop_pid_adapter_)
-          {
-            assign_interface_from_point(joint_command_interface_[1], tmp_command_);
-          }
-          else
-          {
-            assign_interface_from_point(joint_command_interface_[1], state_desired_.velocities);
-          }
-        }
-        if (has_acceleration_command_interface_)
-        {
-          assign_interface_from_point(joint_command_interface_[2], state_desired_.accelerations);
-        }
-        if (has_effort_command_interface_)
-        {
-          if (use_closed_loop_pid_adapter_)
-          {
-            assign_interface_from_point(joint_command_interface_[3], tmp_command_);
-          }
-          else
-          {
-            assign_interface_from_point(joint_command_interface_[3], state_desired_.effort);
-          }
-        }
-
-        // store the previous command. Used in open-loop control mode
-        last_commanded_state_ = state_desired_;
+        write_command_to_hardware((uint64_t)period.nanoseconds());
       }
 
       const auto active_goal = *rt_active_goal_.readFromRT();
@@ -375,7 +321,7 @@ controller_interface::return_type JointTrajectoryController::update(
             // See https://github.com/ros-controls/ros2_controllers/issues/168
             rt_active_goal_.writeFromNonRT(RealtimeGoalHandlePtr());
             RCLCPP_WARN(
-              get_node()->get_logger(), "Aborted due goal_time_tolerance exceeding by %f seconds",
+              get_node()->get_logger(), "Aborted due 'goal_time_tolerance' exceeding by %f seconds",
               time_difference);
           }
           // else, run another cycle while waiting for outside_goal_tolerance
@@ -398,15 +344,6 @@ controller_interface::return_type JointTrajectoryController::update(
 
 bool JointTrajectoryController::read_state_from_hardware(JointTrajectoryPoint & state)
 {
-  auto assign_point_from_interface =
-    [&](std::vector<double> & trajectory_point_interface, const auto & joint_interface)
-  {
-    for (size_t index = 0; index < dof_; ++index)
-    {
-      trajectory_point_interface[index] = joint_interface[index].get().get_value();
-    }
-  };
-
   // Assign values from the hardware
   // Position states always exist
   assign_point_from_interface(state.positions, joint_state_interface_[0]);
@@ -434,18 +371,55 @@ bool JointTrajectoryController::read_state_from_hardware(JointTrajectoryPoint & 
   return true;
 }
 
+void JointTrajectoryController::write_command_to_hardware(const uint64_t period_in_ns)
+{
+  if (use_closed_loop_pid_adapter_)
+  {
+    // Update PIDs
+    for (auto i = 0ul; i < dof_; ++i)
+    {
+      tmp_command_[i] = (state_desired_.velocities[i] * ff_velocity_scale_[i]) +
+                        pids_[i]->computeCommand(
+                          state_error_.positions[i], state_error_.velocities[i], period_in_ns);
+    }
+  }
+
+  // set values for next hardware write()
+  if (has_position_command_interface_)
+  {
+    assign_interface_from_point(joint_command_interface_[0], state_desired_.positions);
+  }
+  if (has_velocity_command_interface_)
+  {
+    if (use_closed_loop_pid_adapter_)
+    {
+      assign_interface_from_point(joint_command_interface_[1], tmp_command_);
+    }
+    else
+    {
+      assign_interface_from_point(joint_command_interface_[1], state_desired_.velocities);
+    }
+  }
+  if (has_acceleration_command_interface_)
+  {
+    assign_interface_from_point(joint_command_interface_[2], state_desired_.accelerations);
+  }
+  if (has_effort_command_interface_)
+  {
+    if (use_closed_loop_pid_adapter_)
+    {
+      assign_interface_from_point(joint_command_interface_[3], tmp_command_);
+    }
+    else
+    {
+      assign_interface_from_point(joint_command_interface_[3], state_desired_.effort);
+    }
+  }
+}
+
 bool JointTrajectoryController::read_state_from_command_interfaces(JointTrajectoryPoint & state)
 {
   bool has_values = true;
-
-  auto assign_point_from_interface =
-    [&](std::vector<double> & trajectory_point_interface, const auto & joint_interface)
-  {
-    for (size_t index = 0; index < dof_; ++index)
-    {
-      trajectory_point_interface[index] = joint_interface[index].get().get_value();
-    }
-  };
 
   auto interface_has_values = [](const auto & joint_interface)
   {
@@ -683,15 +657,15 @@ controller_interface::CallbackReturn JointTrajectoryController::on_configure(
   if (!params_.joint_limiter_type.empty())
   {
     RCLCPP_INFO(
-      get_node()->get_logger(), "Using joint limiter plugin: '%s'", params_.joint_limiter_type.c_str());
+      get_node()->get_logger(), "Using joint limiter plugin: '%s'",
+      params_.joint_limiter_type.c_str());
     joint_limiter_ = std::unique_ptr<JointLimiter>(
       joint_limiter_loader_->createUnmanagedInstance(params_.joint_limiter_type));
     joint_limiter_->init(command_joint_names_, get_node());
   }
   else
   {
-    RCLCPP_INFO(
-      get_node()->get_logger(), "Not using joint limiter plugin as none defined.");
+    RCLCPP_INFO(get_node()->get_logger(), "Not using joint limiter plugin as none defined.");
   }
 
   if (params_.state_interfaces.empty())

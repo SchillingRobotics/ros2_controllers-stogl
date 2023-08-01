@@ -38,6 +38,10 @@ generate_parameter_library(joint_trajectory_controller_parameters
   include/joint_trajectory_controller/validate_jtc_parameters.hpp
 )
 
+generate_parameter_library(cartesian_trajectory_generator_parameters
+  src/cartesian_trajectory_generator_parameters.yaml
+)
+
 add_library(joint_trajectory_controller SHARED
   src/joint_trajectory_controller.cpp
   src/trajectory.cpp
@@ -65,6 +69,7 @@ target_include_directories(cartesian_trajectory_generator PUBLIC
   $<INSTALL_INTERFACE:include/joint_trajectory_controller>
 )
 target_link_libraries(cartesian_trajectory_generator PUBLIC
+  cartesian_trajectory_generator_parameters
   joint_trajectory_controller
 )
 ament_target_dependencies(cartesian_trajectory_generator PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
@@ -129,6 +134,7 @@ install(
 )
 install(TARGETS
     cartesian_trajectory_generator
+    cartesian_trajectory_generator_parameters
     joint_trajectory_controller
     joint_trajectory_controller_parameters
   EXPORT export_joint_trajectory_controller
