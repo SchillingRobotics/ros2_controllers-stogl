@@ -74,7 +74,6 @@ public:
 
 protected:
   bool read_state_from_hardware(JointTrajectoryPoint & state) override;
-  void write_command_to_hardware(const uint64_t period_in_ns = 0) override;
 
   using JointTrajectoryPoint = trajectory_msgs::msg::JointTrajectoryPoint;
   JOINT_TRAJECTORY_CONTROLLER_PUBLIC
