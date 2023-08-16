@@ -223,22 +223,9 @@ void CartesianTrajectoryGenerator::reference_callback(
   geometry_msgs::msg::Vector3 velocities_linear = msg->velocities[0].linear,
                               velocities_angular = msg->velocities[0].angular;
 
-  // Convert translation also into local frame if velocity is used in local frame
+  // Convert velocities into world frame if velocity is used in local frame
   if (ctg_params_.velocity_in_local_frame)
   {
-    // // first store current state
-    // const auto measured_state = *(feedback_.readFromRT());
-    // if (!measured_state)
-    // {
-    //   return false;
-    // }
-    // last_received_measured_position_ = measured_state->pose.pose;
-
-    // The logic here is:
-    // 1. get current transformations between world and command and vice-versa
-    // 2. store the transformation between world and command frame
-    // 3. get the target position in the command frame (from world frame)
-
     // Get current transformation
     bool have_xform = true;
     try
