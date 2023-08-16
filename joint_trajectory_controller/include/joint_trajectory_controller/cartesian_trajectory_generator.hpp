@@ -22,7 +22,6 @@
 
 #include "control_msgs/msg/cartesian_trajectory_generator_state.hpp"
 #include "control_msgs/srv/set_dof_limits.hpp"
-#include "geometry_msgs/msg/pose.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "joint_limits/joint_limits.hpp"
 #include "joint_trajectory_controller/joint_trajectory_controller.hpp"
@@ -86,8 +85,7 @@ protected:
   // Command subscribers and Controller State publisher
   rclcpp::Subscription<ControllerReferenceMsg>::SharedPtr ref_subscriber_ = nullptr;
   rclcpp::Subscription<ControllerReferenceMsg>::SharedPtr ref_subscriber_reliable_ = nullptr;
-  realtime_tools::RealtimeBuffer<std::shared_ptr<ControllerReferenceMsg>> reference_world_;
-  realtime_tools::RealtimeBuffer<std::shared_ptr<ControllerReferenceMsg>> reference_local_;
+  realtime_tools::RealtimeBuffer<std::shared_ptr<ControllerReferenceMsg>> reference_;
 
   rclcpp::Subscription<ControllerFeedbackMsg>::SharedPtr feedback_subscriber_ = nullptr;
   realtime_tools::RealtimeBuffer<std::shared_ptr<ControllerFeedbackMsg>> feedback_;
@@ -97,8 +95,6 @@ protected:
   // Parameters from ROS for cartesian_trajectory_generator
   std::shared_ptr<ParamListener> ctg_param_listener_;
   Params ctg_params_;
-
-  trajectory_msgs::msg::JointTrajectoryPoint control_output_local_;
 
 private:
   void reference_callback(const std::shared_ptr<ControllerReferenceMsg> msg);
@@ -115,12 +111,8 @@ private:
 
   std::vector<joint_limits::JointLimits> configured_joint_limits_;
 
-  // storage of last received measured position to
-  geometry_msgs::msg::Pose last_received_measured_position_;
-
   std::unique_ptr<tf2_ros::Buffer> p_tf_Buffer_;
   std::unique_ptr<tf2_ros::TransformListener> p_tf_Listener_;
-  geometry_msgs::msg::TransformStamped transform_world_to_command_on_reference_receive_;
   geometry_msgs::msg::TransformStamped transform_command_to_world_on_reference_receive_;
 };
 

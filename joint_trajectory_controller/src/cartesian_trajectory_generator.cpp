@@ -143,8 +143,7 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
 
   std::shared_ptr<ControllerReferenceMsg> msg = std::make_shared<ControllerReferenceMsg>();
   reset_controller_reference_msg(msg);
-  reference_world_.writeFromNonRT(msg);
-  reference_local_.writeFromNonRT(msg);
+  reference_.writeFromNonRT(msg);
 
   // Odometry feedback
   auto feedback_callback = [&](const std::shared_ptr<ControllerFeedbackMsg> msg) -> void
@@ -173,12 +172,9 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
 
   cart_state_publisher_->lock();
   cart_state_publisher_->msg_.dof_names = params_.joints;
-  cart_state_publisher_->msg_.reference_world.transforms.resize(1);
-  cart_state_publisher_->msg_.reference_world.velocities.resize(1);
-  cart_state_publisher_->msg_.reference_world.accelerations.resize(1);
-  cart_state_publisher_->msg_.reference_local.transforms.resize(1);
-  cart_state_publisher_->msg_.reference_local.velocities.resize(1);
-  cart_state_publisher_->msg_.reference_local.accelerations.resize(1);
+  cart_state_publisher_->msg_.reference.transforms.resize(1);
+  cart_state_publisher_->msg_.reference.velocities.resize(1);
+  cart_state_publisher_->msg_.reference.accelerations.resize(1);
   cart_state_publisher_->msg_.feedback.transforms.resize(1);
   cart_state_publisher_->msg_.feedback.velocities.resize(1);
   cart_state_publisher_->msg_.feedback.accelerations.resize(1);
@@ -188,9 +184,6 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
   cart_state_publisher_->msg_.output_world.transforms.resize(1);
   cart_state_publisher_->msg_.output_world.velocities.resize(1);
   cart_state_publisher_->msg_.output_world.accelerations.resize(1);
-  cart_state_publisher_->msg_.output_local.transforms.resize(1);
-  cart_state_publisher_->msg_.output_local.velocities.resize(1);
-  cart_state_publisher_->msg_.output_local.accelerations.resize(1);
   cart_state_publisher_->unlock();
 
   return CallbackReturn::SUCCESS;
@@ -200,7 +193,7 @@ void CartesianTrajectoryGenerator::reference_callback(
   const std::shared_ptr<ControllerReferenceMsg> msg)
 {
   // store input ref for later use
-  reference_world_.writeFromNonRT(msg);
+  reference_.writeFromNonRT(msg);
 
   // assume for now that we are working with trajectories with one point - we don't know exactly
   // where we are in the trajectory before sampling - nevertheless this should work for the use case
@@ -250,8 +243,6 @@ void CartesianTrajectoryGenerator::reference_callback(
     bool have_xform = true;
     try
     {
-      transform_world_to_command_on_reference_receive_ = p_tf_Buffer_->lookupTransform(
-        ctg_params_.command_frame_id, ctg_params_.world_frame_id, rclcpp::Time());
       transform_command_to_world_on_reference_receive_ = p_tf_Buffer_->lookupTransform(
         ctg_params_.world_frame_id, ctg_params_.command_frame_id, rclcpp::Time());
     }
@@ -279,8 +270,6 @@ void CartesianTrajectoryGenerator::reference_callback(
       tf2::doTransform(
         velocities_angular, velocities_angular, transform_command_to_world_on_reference_receive_);
     }
-
-    reference_local_.writeFromNonRT(msg);
   }
 
   assign_value_from_input(
@@ -526,8 +515,7 @@ void CartesianTrajectoryGenerator::publish_state(
   if (cart_state_publisher_->trylock())
   {
     cart_state_publisher_->msg_.header.stamp = time;
-    cart_state_publisher_->msg_.reference_world = *(*reference_world_.readFromRT());
-    cart_state_publisher_->msg_.reference_local = *(*reference_local_.readFromRT());
+    cart_state_publisher_->msg_.reference = *(*reference_.readFromRT());
 
     auto set_multi_dof_point =
       [&](
@@ -569,7 +557,6 @@ void CartesianTrajectoryGenerator::publish_state(
     set_multi_dof_point(cart_state_publisher_->msg_.feedback, current_state);
     set_multi_dof_point(cart_state_publisher_->msg_.error, state_error);
     set_multi_dof_point(cart_state_publisher_->msg_.output_world, desired_state);
-    set_multi_dof_point(cart_state_publisher_->msg_.output_local, control_output_local_);
 
     cart_state_publisher_->unlockAndPublish();
   }
