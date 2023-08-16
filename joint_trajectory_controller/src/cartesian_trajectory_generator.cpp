@@ -136,19 +136,19 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
   p_tf_Listener_.reset(new tf2_ros::TransformListener(*p_tf_Buffer_.get(), true));
 
   // topics QoS
-  auto subscribers_qos = rclcpp::SystemDefaultsQoS();
-  subscribers_qos.keep_last(1);
-  subscribers_qos.best_effort();
+  auto qos_best_effort_history_depth_one = rclcpp::SystemDefaultsQoS();
+  qos_best_effort_history_depth_one.keep_last(1);
+  qos_best_effort_history_depth_one.best_effort();
   auto subscribers_reliable_qos = rclcpp::SystemDefaultsQoS();
   subscribers_reliable_qos.keep_all();
   subscribers_reliable_qos.reliable();
 
   // Reference Subscribers (reliable channel also for updates not to be missed)
   ref_subscriber_ = get_node()->create_subscription<ControllerReferenceMsg>(
-    "~/reference", subscribers_qos,
+    "~/reference", qos_best_effort_history_depth_one,
     std::bind(&CartesianTrajectoryGenerator::reference_callback, this, std::placeholders::_1));
   ref_subscriber_reliable_ = get_node()->create_subscription<ControllerReferenceMsg>(
-    "~/reference_reliable", subscribers_qos,
+    "~/reference_reliable", subscribers_reliable_qos,
     std::bind(&CartesianTrajectoryGenerator::reference_callback, this, std::placeholders::_1));
 
   std::shared_ptr<ControllerReferenceMsg> msg = std::make_shared<ControllerReferenceMsg>();
@@ -160,7 +160,7 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
   auto feedback_callback = [&](const std::shared_ptr<ControllerFeedbackMsg> msg) -> void
   { feedback_.writeFromNonRT(msg); };
   feedback_subscriber_ = get_node()->create_subscription<ControllerFeedbackMsg>(
-    "~/feedback", subscribers_qos, feedback_callback);
+    "~/feedback", qos_best_effort_history_depth_one, feedback_callback);
   // initialize feedback to null pointer since it is used to determine if we have valid data or not
   feedback_.writeFromNonRT(nullptr);
 
@@ -178,7 +178,7 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
     services_qos);
 
   cart_publisher_ = get_node()->create_publisher<CartControllerStateMsg>(
-    "~/controller_state_cartesian", rclcpp::SystemDefaultsQoS());
+    "~/controller_state_cartesian", qos_best_effort_history_depth_one);
   cart_state_publisher_ = std::make_unique<CartStatePublisher>(cart_publisher_);
 
   cart_state_publisher_->lock();
