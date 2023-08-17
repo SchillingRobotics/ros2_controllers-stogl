@@ -417,6 +417,12 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_activate(
   return CallbackReturn::SUCCESS;
 }
 
+controller_interface::return_type CartesianTrajectoryGenerator::update(
+  const rclcpp::Time & time, const rclcpp::Duration & period)
+{
+  return JointTrajectoryController::update(time, period);
+}
+
 bool CartesianTrajectoryGenerator::read_state_from_hardware(JointTrajectoryPoint & state)
 {
   std::array<double, 3> orientation_angles;
