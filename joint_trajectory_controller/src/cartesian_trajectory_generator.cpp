@@ -62,6 +62,33 @@ void reset_controller_reference_msg(const std::shared_ptr<ControllerReferenceMsg
   reset_controller_reference_msg(*msg);
 }
 
+void set_nan_values_to_zero(double & data)
+{
+  if (std::isnan(data)) data = 0.0;
+}
+
+void set_nan_values_to_zero(geometry_msgs::msg::Vector3 & v)
+{
+  set_nan_values_to_zero(v.x);
+  set_nan_values_to_zero(v.y);
+  set_nan_values_to_zero(v.z);
+}
+
+void set_small_values_to_nan(double & data)
+{
+  if (std::abs(data) <= std::numeric_limits<double>::epsilon())
+  {
+    data = std::numeric_limits<double>::quiet_NaN();
+  }
+}
+
+void set_small_values_to_nan(geometry_msgs::msg::Vector3 & v)
+{
+  set_small_values_to_nan(v.x);
+  set_small_values_to_nan(v.y);
+  set_small_values_to_nan(v.z);
+}
+
 void rpy_to_quaternion(
   std::array<double, 3> & orientation_angles, geometry_msgs::msg::Quaternion & quaternion_msg)
 {
@@ -143,7 +170,8 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
 
   std::shared_ptr<ControllerReferenceMsg> msg = std::make_shared<ControllerReferenceMsg>();
   reset_controller_reference_msg(msg);
-  reference_.writeFromNonRT(msg);
+  reference_input_.writeFromNonRT(msg);
+  reference_updated_.writeFromNonRT(*msg);
 
   // Odometry feedback
   auto feedback_callback = [&](const std::shared_ptr<ControllerFeedbackMsg> msg) -> void
@@ -172,9 +200,12 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
 
   cart_state_publisher_->lock();
   cart_state_publisher_->msg_.dof_names = params_.joints;
-  cart_state_publisher_->msg_.reference.transforms.resize(1);
-  cart_state_publisher_->msg_.reference.velocities.resize(1);
-  cart_state_publisher_->msg_.reference.accelerations.resize(1);
+  cart_state_publisher_->msg_.reference_input.transforms.resize(1);
+  cart_state_publisher_->msg_.reference_input.velocities.resize(1);
+  cart_state_publisher_->msg_.reference_input.accelerations.resize(1);
+  cart_state_publisher_->msg_.reference_updated.transforms.resize(1);
+  cart_state_publisher_->msg_.reference_updated.velocities.resize(1);
+  cart_state_publisher_->msg_.reference_updated.accelerations.resize(1);
   cart_state_publisher_->msg_.feedback.transforms.resize(1);
   cart_state_publisher_->msg_.feedback.velocities.resize(1);
   cart_state_publisher_->msg_.feedback.accelerations.resize(1);
@@ -192,8 +223,10 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
 void CartesianTrajectoryGenerator::reference_callback(
   const std::shared_ptr<ControllerReferenceMsg> msg)
 {
+  ControllerReferenceMsg msg_updated = *msg;
+
   // store input ref for later use
-  reference_.writeFromNonRT(msg);
+  reference_input_.writeFromNonRT(msg);
 
   // assume for now that we are working with trajectories with one point - we don't know exactly
   // where we are in the trajectory before sampling - nevertheless this should work for the use case
@@ -220,12 +253,16 @@ void CartesianTrajectoryGenerator::reference_callback(
     }
   };
 
-  geometry_msgs::msg::Vector3 velocities_linear = msg->velocities[0].linear,
-                              velocities_angular = msg->velocities[0].angular;
-
   // Convert velocities into world frame if velocity is used in local frame
   if (ctg_params_.velocity_in_local_frame)
   {
+    geometry_msgs::msg::Vector3 velocities_linear = msg->velocities[0].linear,
+                                velocities_angular = msg->velocities[0].angular;
+
+    // can't do transforms for nan values, so make sure they are zero
+    set_nan_values_to_zero(velocities_linear);
+    set_nan_values_to_zero(velocities_angular);
+
     // Get current transformation
     bool have_xform = true;
     try
@@ -245,8 +282,14 @@ void CartesianTrajectoryGenerator::reference_callback(
       !std::isnan(velocities_linear.z))
     {
       // transform from local(command) to world frame
+      geometry_msgs::msg::Vector3 velocities_linear_out;
       tf2::doTransform(
-        velocities_linear, velocities_linear, transform_command_to_world_on_reference_receive_);
+        velocities_linear, velocities_linear_out, transform_command_to_world_on_reference_receive_);
+
+      // set zero values to nan so trajectory generator ignores them
+      set_small_values_to_nan(velocities_linear_out);
+
+      msg_updated.velocities[0].linear = velocities_linear_out;
     }
 
     if (
@@ -254,23 +297,39 @@ void CartesianTrajectoryGenerator::reference_callback(
       !std::isnan(velocities_angular.z))
     {
       // transform from local(command) to world frame
+      geometry_msgs::msg::Vector3 velocities_angular_out;
       tf2::doTransform(
-        velocities_angular, velocities_angular, transform_command_to_world_on_reference_receive_);
+        velocities_angular, velocities_angular_out,
+        transform_command_to_world_on_reference_receive_);
+
+      // set zero values to nan so trajectory generator ignores them
+      set_small_values_to_nan(velocities_angular_out);
+
+      msg_updated.velocities[0].angular = velocities_angular_out;
     }
   }
 
+  // store updated reference for later use
+  reference_updated_.writeFromNonRT(msg_updated);
+
   assign_value_from_input(
-    msg->transforms[0].translation.x, velocities_linear.x, params_.joints[0], 0);
+    msg_updated.transforms[0].translation.x, msg_updated.velocities[0].linear.x, params_.joints[0],
+    0);
   assign_value_from_input(
-    msg->transforms[0].translation.y, velocities_linear.y, params_.joints[1], 1);
+    msg_updated.transforms[0].translation.y, msg_updated.velocities[0].linear.y, params_.joints[1],
+    1);
   assign_value_from_input(
-    msg->transforms[0].translation.z, velocities_linear.z, params_.joints[2], 2);
+    msg_updated.transforms[0].translation.z, msg_updated.velocities[0].linear.z, params_.joints[2],
+    2);
   assign_value_from_input(
-    msg->transforms[0].rotation.x, velocities_angular.x, params_.joints[3], 3);
+    msg_updated.transforms[0].rotation.x, msg_updated.velocities[0].angular.x, params_.joints[3],
+    3);
   assign_value_from_input(
-    msg->transforms[0].rotation.y, velocities_angular.y, params_.joints[4], 4);
+    msg_updated.transforms[0].rotation.y, msg_updated.velocities[0].angular.y, params_.joints[4],
+    4);
   assign_value_from_input(
-    msg->transforms[0].rotation.z, velocities_angular.z, params_.joints[5], 5);
+    msg_updated.transforms[0].rotation.z, msg_updated.velocities[0].angular.z, params_.joints[5],
+    5);
 
   add_new_trajectory_msg(new_traj_msg);
 }
@@ -502,7 +561,8 @@ void CartesianTrajectoryGenerator::publish_state(
   if (cart_state_publisher_->trylock())
   {
     cart_state_publisher_->msg_.header.stamp = time;
-    cart_state_publisher_->msg_.reference = *(*reference_.readFromRT());
+    cart_state_publisher_->msg_.reference_input = *(*reference_input_.readFromRT());
+    cart_state_publisher_->msg_.reference_updated = (*reference_updated_.readFromRT());
 
     auto set_multi_dof_point =
       [&](
