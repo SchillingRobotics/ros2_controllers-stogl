@@ -86,7 +86,6 @@ protected:
   rclcpp::Subscription<ControllerReferenceMsg>::SharedPtr ref_subscriber_ = nullptr;
   rclcpp::Subscription<ControllerReferenceMsg>::SharedPtr ref_subscriber_reliable_ = nullptr;
   realtime_tools::RealtimeBuffer<std::shared_ptr<ControllerReferenceMsg>> reference_input_;
-  realtime_tools::RealtimeBuffer<ControllerReferenceMsg> reference_updated_;
 
   rclcpp::Subscription<ControllerFeedbackMsg>::SharedPtr feedback_subscriber_ = nullptr;
   realtime_tools::RealtimeBuffer<std::shared_ptr<ControllerFeedbackMsg>> feedback_;
