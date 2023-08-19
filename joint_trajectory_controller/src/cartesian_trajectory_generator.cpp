@@ -71,6 +71,84 @@ void rpy_to_quaternion(
   quaternion_msg = tf2::toMsg(quaternion);
 }
 
+void set_vector3(geometry_msgs::msg::Vector3 & v, const double x, const double y, const double z)
+{
+  v.x = x;
+  v.y = y;
+  v.z = z;
+}
+
+void transform_velocity_limits(
+  const std::vector<joint_limits::JointLimits> & joint_limits_in,
+  std::vector<joint_limits::JointLimits> & joint_limits_out, const size_t start_index,
+  const geometry_msgs::msg::TransformStamped & xform)
+{
+  if (
+    joint_limits_in[start_index].has_velocity_limits &&
+    joint_limits_in[start_index + 1].has_velocity_limits &&
+    joint_limits_in[start_index + 2].has_velocity_limits)
+  {
+    geometry_msgs::msg::Vector3 joint_limits_velocity;
+    set_vector3(
+      joint_limits_velocity, joint_limits_in[start_index].max_velocity,
+      joint_limits_in[start_index + 1].max_velocity, joint_limits_in[start_index + 2].max_velocity);
+
+    // transform from local(command) to world frame
+    tf2::doTransform(joint_limits_velocity, joint_limits_velocity, xform);
+    joint_limits_out[start_index].max_velocity = std::abs(joint_limits_velocity.x);
+    joint_limits_out[start_index + 1].max_velocity = std::abs(joint_limits_velocity.y);
+    joint_limits_out[start_index + 2].max_velocity = std::abs(joint_limits_velocity.z);
+  }
+}
+
+void transform_acceleration_limits(
+  const std::vector<joint_limits::JointLimits> & joint_limits_in,
+  std::vector<joint_limits::JointLimits> & joint_limits_out, const size_t start_index,
+  const geometry_msgs::msg::TransformStamped & xform)
+{
+  if (
+    joint_limits_in[start_index].has_acceleration_limits &&
+    joint_limits_in[start_index + 1].has_acceleration_limits &&
+    joint_limits_in[start_index + 2].has_acceleration_limits)
+  {
+    geometry_msgs::msg::Vector3 joint_limits_accel;
+    set_vector3(
+      joint_limits_accel, joint_limits_in[start_index].max_acceleration,
+      joint_limits_in[start_index + 1].max_acceleration,
+      joint_limits_in[start_index + 2].max_acceleration);
+
+    // transform from local(command) to world frame
+    tf2::doTransform(joint_limits_accel, joint_limits_accel, xform);
+    joint_limits_out[start_index].max_acceleration = std::abs(joint_limits_accel.x);
+    joint_limits_out[start_index + 1].max_acceleration = std::abs(joint_limits_accel.y);
+    joint_limits_out[start_index + 2].max_acceleration = std::abs(joint_limits_accel.z);
+  }
+}
+
+void transform_deceleration_limits(
+  const std::vector<joint_limits::JointLimits> & joint_limits_in,
+  std::vector<joint_limits::JointLimits> & joint_limits_out, const size_t start_index,
+  const geometry_msgs::msg::TransformStamped & xform)
+{
+  if (
+    joint_limits_in[start_index].has_deceleration_limits &&
+    joint_limits_in[start_index + 1].has_deceleration_limits &&
+    joint_limits_in[start_index + 2].has_deceleration_limits)
+  {
+    geometry_msgs::msg::Vector3 joint_limits_decel;
+    set_vector3(
+      joint_limits_decel, joint_limits_in[start_index].max_deceleration,
+      joint_limits_in[start_index + 1].max_deceleration,
+      joint_limits_in[start_index + 2].max_deceleration);
+
+    // transform from local(command) to world frame
+    tf2::doTransform(joint_limits_decel, joint_limits_decel, xform);
+    joint_limits_out[start_index].max_deceleration = std::abs(joint_limits_decel.x);
+    joint_limits_out[start_index + 1].max_deceleration = std::abs(joint_limits_decel.y);
+    joint_limits_out[start_index + 2].max_deceleration = std::abs(joint_limits_decel.z);
+  }
+}
+
 }  // namespace
 
 namespace cartesian_trajectory_generator
@@ -121,6 +199,7 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
 
   // store joint limits for later
   configured_joint_limits_ = joint_limits_;
+  modified_joint_limits_ = joint_limits_;
 
   p_tf_Buffer_.reset(new tf2_ros::Buffer(get_node()->get_clock()));
   p_tf_Listener_.reset(new tf2_ros::TransformListener(*p_tf_Buffer_.get(), true));
@@ -252,7 +331,7 @@ void CartesianTrajectoryGenerator::set_joint_limits_service_callback(
   }
 
   // start with current limits
-  auto new_joint_limits = joint_limits_;
+  auto new_joint_limits = modified_joint_limits_;
 
   // lambda for setting new limit
   auto update_limit_from_request = [](
@@ -351,6 +430,7 @@ void CartesianTrajectoryGenerator::set_joint_limits_service_callback(
   }
 
   // TODO(destogl): use buffers to sync comm between threads
+  modified_joint_limits_ = new_joint_limits;
   joint_limits_ = new_joint_limits;
 }
 
@@ -420,6 +500,46 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_activate(
 controller_interface::return_type CartesianTrajectoryGenerator::update(
   const rclcpp::Time & time, const rclcpp::Duration & period)
 {
+  // Convert velocities into world frame if velocity is used in local frame
+  if (ctg_params_.velocity_in_local_frame)
+  {
+    // Get current transformation
+    bool have_xform = true;
+    try
+    {
+      transform_command_to_world_on_reference_receive_ = p_tf_Buffer_->lookupTransform(
+        ctg_params_.world_frame_id, ctg_params_.command_frame_id, rclcpp::Time());
+    }
+    catch (const tf2::TransformException & ex)
+    {
+      have_xform = false;
+      RCLCPP_ERROR_SKIPFIRST_THROTTLE(
+        get_node()->get_logger(), *(get_node()->get_clock()), 5000, "%s", ex.what());
+    }
+
+    // transform linear velocity limits from local(command) to world frame
+    if (have_xform)
+    {
+      // linear velocity limits
+      transform_velocity_limits(
+        modified_joint_limits_, joint_limits_, 0, transform_command_to_world_on_reference_receive_);
+      // angular velocity limits
+      transform_velocity_limits(
+        modified_joint_limits_, joint_limits_, 3, transform_command_to_world_on_reference_receive_);
+      // linear acceleration limits
+      transform_acceleration_limits(
+        modified_joint_limits_, joint_limits_, 0, transform_command_to_world_on_reference_receive_);
+      // angular acceleration limits
+      transform_acceleration_limits(
+        modified_joint_limits_, joint_limits_, 3, transform_command_to_world_on_reference_receive_);
+      // linear deceleration limits
+      transform_deceleration_limits(
+        modified_joint_limits_, joint_limits_, 0, transform_command_to_world_on_reference_receive_);
+      // angular deceleration limits
+      transform_deceleration_limits(
+        modified_joint_limits_, joint_limits_, 3, transform_command_to_world_on_reference_receive_);
+    }
+  }
   return JointTrajectoryController::update(time, period);
 }
 

@@ -112,7 +112,10 @@ private:
   rclcpp::Publisher<CartControllerStateMsg>::SharedPtr cart_publisher_;
   CartStatePublisherPtr cart_state_publisher_;
 
+  // joint limits set at start(configuration) time
   std::vector<joint_limits::JointLimits> configured_joint_limits_;
+  // joint limits modified by user at runtime, set initially to configured limits
+  std::vector<joint_limits::JointLimits> modified_joint_limits_;
 
   std::unique_ptr<tf2_ros::Buffer> p_tf_Buffer_;
   std::unique_ptr<tf2_ros::TransformListener> p_tf_Listener_;
