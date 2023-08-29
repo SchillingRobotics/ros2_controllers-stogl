@@ -62,16 +62,6 @@ void reset_controller_reference_msg(const std::shared_ptr<ControllerReferenceMsg
   reset_controller_reference_msg(*msg);
 }
 
-void quaternion_to_rpy(
-  const geometry_msgs::msg::Quaternion & quaternion_msg, std::array<double, 3> & orientation_angles)
-{
-  // convert quaternion to euler angles
-  tf2::Quaternion quaternion;
-  tf2::fromMsg(quaternion_msg, quaternion);
-  tf2::Matrix3x3 m(quaternion);
-  m.getRPY(orientation_angles[0], orientation_angles[1], orientation_angles[2]);
-}
-
 void rpy_to_quaternion(
   std::array<double, 3> & orientation_angles, geometry_msgs::msg::Quaternion & quaternion_msg)
 {
@@ -79,6 +69,84 @@ void rpy_to_quaternion(
   tf2::Quaternion quaternion;
   quaternion.setRPY(orientation_angles[0], orientation_angles[1], orientation_angles[2]);
   quaternion_msg = tf2::toMsg(quaternion);
+}
+
+void set_vector3(geometry_msgs::msg::Vector3 & v, const double x, const double y, const double z)
+{
+  v.x = x;
+  v.y = y;
+  v.z = z;
+}
+
+void transform_velocity_limits(
+  const std::vector<joint_limits::JointLimits> & joint_limits_in,
+  std::vector<joint_limits::JointLimits> & joint_limits_out, const size_t start_index,
+  const geometry_msgs::msg::TransformStamped & xform)
+{
+  if (
+    joint_limits_in[start_index].has_velocity_limits &&
+    joint_limits_in[start_index + 1].has_velocity_limits &&
+    joint_limits_in[start_index + 2].has_velocity_limits)
+  {
+    geometry_msgs::msg::Vector3 joint_limits_velocity;
+    set_vector3(
+      joint_limits_velocity, joint_limits_in[start_index].max_velocity,
+      joint_limits_in[start_index + 1].max_velocity, joint_limits_in[start_index + 2].max_velocity);
+
+    // transform from local(command) to world frame
+    tf2::doTransform(joint_limits_velocity, joint_limits_velocity, xform);
+    joint_limits_out[start_index].max_velocity = std::abs(joint_limits_velocity.x);
+    joint_limits_out[start_index + 1].max_velocity = std::abs(joint_limits_velocity.y);
+    joint_limits_out[start_index + 2].max_velocity = std::abs(joint_limits_velocity.z);
+  }
+}
+
+void transform_acceleration_limits(
+  const std::vector<joint_limits::JointLimits> & joint_limits_in,
+  std::vector<joint_limits::JointLimits> & joint_limits_out, const size_t start_index,
+  const geometry_msgs::msg::TransformStamped & xform)
+{
+  if (
+    joint_limits_in[start_index].has_acceleration_limits &&
+    joint_limits_in[start_index + 1].has_acceleration_limits &&
+    joint_limits_in[start_index + 2].has_acceleration_limits)
+  {
+    geometry_msgs::msg::Vector3 joint_limits_accel;
+    set_vector3(
+      joint_limits_accel, joint_limits_in[start_index].max_acceleration,
+      joint_limits_in[start_index + 1].max_acceleration,
+      joint_limits_in[start_index + 2].max_acceleration);
+
+    // transform from local(command) to world frame
+    tf2::doTransform(joint_limits_accel, joint_limits_accel, xform);
+    joint_limits_out[start_index].max_acceleration = std::abs(joint_limits_accel.x);
+    joint_limits_out[start_index + 1].max_acceleration = std::abs(joint_limits_accel.y);
+    joint_limits_out[start_index + 2].max_acceleration = std::abs(joint_limits_accel.z);
+  }
+}
+
+void transform_deceleration_limits(
+  const std::vector<joint_limits::JointLimits> & joint_limits_in,
+  std::vector<joint_limits::JointLimits> & joint_limits_out, const size_t start_index,
+  const geometry_msgs::msg::TransformStamped & xform)
+{
+  if (
+    joint_limits_in[start_index].has_deceleration_limits &&
+    joint_limits_in[start_index + 1].has_deceleration_limits &&
+    joint_limits_in[start_index + 2].has_deceleration_limits)
+  {
+    geometry_msgs::msg::Vector3 joint_limits_decel;
+    set_vector3(
+      joint_limits_decel, joint_limits_in[start_index].max_deceleration,
+      joint_limits_in[start_index + 1].max_deceleration,
+      joint_limits_in[start_index + 2].max_deceleration);
+
+    // transform from local(command) to world frame
+    tf2::doTransform(joint_limits_decel, joint_limits_decel, xform);
+    joint_limits_out[start_index].max_deceleration = std::abs(joint_limits_decel.x);
+    joint_limits_out[start_index + 1].max_deceleration = std::abs(joint_limits_decel.y);
+    joint_limits_out[start_index + 2].max_deceleration = std::abs(joint_limits_decel.z);
+  }
 }
 
 }  // namespace
@@ -131,6 +199,7 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
 
   // store joint limits for later
   configured_joint_limits_ = joint_limits_;
+  modified_joint_limits_ = joint_limits_;
 
   p_tf_Buffer_.reset(new tf2_ros::Buffer(get_node()->get_clock()));
   p_tf_Listener_.reset(new tf2_ros::TransformListener(*p_tf_Buffer_.get(), true));
@@ -153,8 +222,7 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
 
   std::shared_ptr<ControllerReferenceMsg> msg = std::make_shared<ControllerReferenceMsg>();
   reset_controller_reference_msg(msg);
-  reference_world_.writeFromNonRT(msg);
-  reference_local_.writeFromNonRT(msg);
+  reference_input_.writeFromNonRT(msg);
 
   // Odometry feedback
   auto feedback_callback = [&](const std::shared_ptr<ControllerFeedbackMsg> msg) -> void
@@ -183,12 +251,9 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
 
   cart_state_publisher_->lock();
   cart_state_publisher_->msg_.dof_names = params_.joints;
-  cart_state_publisher_->msg_.reference_world.transforms.resize(1);
-  cart_state_publisher_->msg_.reference_world.velocities.resize(1);
-  cart_state_publisher_->msg_.reference_world.accelerations.resize(1);
-  cart_state_publisher_->msg_.reference_local.transforms.resize(1);
-  cart_state_publisher_->msg_.reference_local.velocities.resize(1);
-  cart_state_publisher_->msg_.reference_local.accelerations.resize(1);
+  cart_state_publisher_->msg_.reference_input.transforms.resize(1);
+  cart_state_publisher_->msg_.reference_input.velocities.resize(1);
+  cart_state_publisher_->msg_.reference_input.accelerations.resize(1);
   cart_state_publisher_->msg_.feedback.transforms.resize(1);
   cart_state_publisher_->msg_.feedback.velocities.resize(1);
   cart_state_publisher_->msg_.feedback.accelerations.resize(1);
@@ -198,9 +263,6 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
   cart_state_publisher_->msg_.output_world.transforms.resize(1);
   cart_state_publisher_->msg_.output_world.velocities.resize(1);
   cart_state_publisher_->msg_.output_world.accelerations.resize(1);
-  cart_state_publisher_->msg_.output_local.transforms.resize(1);
-  cart_state_publisher_->msg_.output_local.velocities.resize(1);
-  cart_state_publisher_->msg_.output_local.accelerations.resize(1);
   cart_state_publisher_->unlock();
 
   return CallbackReturn::SUCCESS;
@@ -210,7 +272,7 @@ void CartesianTrajectoryGenerator::reference_callback(
   const std::shared_ptr<ControllerReferenceMsg> msg)
 {
   // store input ref for later use
-  reference_world_.writeFromNonRT(msg);
+  reference_input_.writeFromNonRT(msg);
 
   // assume for now that we are working with trajectories with one point - we don't know exactly
   // where we are in the trajectory before sampling - nevertheless this should work for the use case
@@ -236,55 +298,6 @@ void CartesianTrajectoryGenerator::reference_callback(
         get_node()->get_logger(), "Input position and velocity for %s is NaN", joint_name.c_str());
     }
   };
-
-  std::array<double, 3> orientation_angles = {
-    msg->transforms[0].rotation.x, msg->transforms[0].rotation.y, msg->transforms[0].rotation.z};
-  // Convert translation also into local frame if velocity is used in local frame
-  if (ctg_params_.velocity_in_local_frame)
-  {
-    // // first store current state
-    // const auto measured_state = *(feedback_.readFromRT());
-    // if (!measured_state)
-    // {
-    //   return false;
-    // }
-    // last_received_measured_position_ = measured_state->pose.pose;
-
-    // The logic here is:
-    // 1. get current transformations between world and command and vice-versa
-    // 2. store the transformation between world and command frame
-    // 3. get the target position in the command frame (from world frame)
-
-    // Get current transformation
-    try
-    {
-      transform_world_to_command_on_reference_receive_ = p_tf_Buffer_->lookupTransform(
-        ctg_params_.command_frame_id, ctg_params_.world_frame_id, rclcpp::Time());
-      transform_command_to_world_on_reference_receive_ = p_tf_Buffer_->lookupTransform(
-        ctg_params_.world_frame_id, ctg_params_.command_frame_id, rclcpp::Time());
-    }
-    catch (const tf2::TransformException & ex)
-    {
-      RCLCPP_ERROR_SKIPFIRST_THROTTLE(
-        get_node()->get_logger(), *(get_node()->get_clock()), 5000, "%s", ex.what());
-    }
-    // transform from world to command frame
-    tf2::doTransform(
-      msg->transforms[0].translation, msg->transforms[0].translation,
-      transform_world_to_command_on_reference_receive_);
-
-    geometry_msgs::msg::Quaternion quaternion_world, quaternion_command;
-    rpy_to_quaternion(orientation_angles, quaternion_world);
-    tf2::doTransform(
-      quaternion_world, quaternion_command, transform_world_to_command_on_reference_receive_);
-    quaternion_to_rpy(quaternion_command, orientation_angles);
-
-    msg->transforms[0].rotation.x = orientation_angles[0];
-    msg->transforms[0].rotation.y = orientation_angles[1];
-    msg->transforms[0].rotation.z = orientation_angles[2];
-
-    reference_local_.writeFromNonRT(msg);
-  }
 
   assign_value_from_input(
     msg->transforms[0].translation.x, msg->velocities[0].linear.x, params_.joints[0], 0);
@@ -318,7 +331,7 @@ void CartesianTrajectoryGenerator::set_joint_limits_service_callback(
   }
 
   // start with current limits
-  auto new_joint_limits = joint_limits_;
+  auto new_joint_limits = modified_joint_limits_;
 
   // lambda for setting new limit
   auto update_limit_from_request = [](
@@ -417,6 +430,7 @@ void CartesianTrajectoryGenerator::set_joint_limits_service_callback(
   }
 
   // TODO(destogl): use buffers to sync comm between threads
+  modified_joint_limits_ = new_joint_limits;
   joint_limits_ = new_joint_limits;
 }
 
@@ -438,20 +452,6 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_activate(
       return controller_interface::CallbackReturn::ERROR;
     }
   }
-  //   for (const auto & interface : state_interface_types_)
-  //   {
-  //     auto it =
-  //     std::find(allowed_interface_types_.begin(), allowed_interface_types_.end(), interface);
-  //     auto index = std::distance(allowed_interface_types_.begin(), it);
-  //     if (!controller_interface::get_ordered_interfaces(
-  //       state_interfaces_, joint_names_, interface, joint_state_interface_[index]))
-  //     {
-  //       RCLCPP_ERROR(
-  //         get_node()->get_logger(), "Expected %zu '%s' state interfaces, got %zu.", dof_,
-  //                    interface.c_str(), joint_state_interface_[index].size());
-  //       return controller_interface::CallbackReturn::ERROR;
-  //     }
-  //   }
 
   // Store 'home' pose
   traj_msg_home_ptr_ = std::make_shared<trajectory_msgs::msg::JointTrajectory>();
@@ -497,35 +497,73 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_activate(
   return CallbackReturn::SUCCESS;
 }
 
+controller_interface::return_type CartesianTrajectoryGenerator::update(
+  const rclcpp::Time & time, const rclcpp::Duration & period)
+{
+  // Convert velocities into world frame if velocity is used in local frame
+  if (ctg_params_.velocity_in_local_frame)
+  {
+    // Get current transformation
+    bool have_xform = true;
+    try
+    {
+      transform_command_to_world_on_reference_receive_ = p_tf_Buffer_->lookupTransform(
+        ctg_params_.world_frame_id, ctg_params_.command_frame_id, rclcpp::Time());
+    }
+    catch (const tf2::TransformException & ex)
+    {
+      have_xform = false;
+      RCLCPP_ERROR_SKIPFIRST_THROTTLE(
+        get_node()->get_logger(), *(get_node()->get_clock()), 5000, "%s", ex.what());
+    }
+
+    // transform linear velocity limits from local(command) to world frame
+    if (have_xform)
+    {
+      // linear velocity limits
+      transform_velocity_limits(
+        modified_joint_limits_, joint_limits_, 0, transform_command_to_world_on_reference_receive_);
+      // angular velocity limits
+      transform_velocity_limits(
+        modified_joint_limits_, joint_limits_, 3, transform_command_to_world_on_reference_receive_);
+      // linear acceleration limits
+      transform_acceleration_limits(
+        modified_joint_limits_, joint_limits_, 0, transform_command_to_world_on_reference_receive_);
+      // angular acceleration limits
+      transform_acceleration_limits(
+        modified_joint_limits_, joint_limits_, 3, transform_command_to_world_on_reference_receive_);
+      // linear deceleration limits
+      transform_deceleration_limits(
+        modified_joint_limits_, joint_limits_, 0, transform_command_to_world_on_reference_receive_);
+      // angular deceleration limits
+      transform_deceleration_limits(
+        modified_joint_limits_, joint_limits_, 3, transform_command_to_world_on_reference_receive_);
+    }
+  }
+  return JointTrajectoryController::update(time, period);
+}
+
 bool CartesianTrajectoryGenerator::read_state_from_hardware(JointTrajectoryPoint & state)
 {
+  std::array<double, 3> orientation_angles;
   const auto measured_state = *(feedback_.readFromRT());
   if (!measured_state)
   {
     return false;
   }
+  tf2::Quaternion measured_q;
+  tf2::fromMsg(measured_state->pose.pose.orientation, measured_q);
+  tf2::Matrix3x3 m(measured_q);
+  m.getRPY(orientation_angles[0], orientation_angles[1], orientation_angles[2]);
 
-  // if velocity used in local frame then convert position in the local frame
-  // NOTE: this is tested only in open-loop mode!
-  if (ctg_params_.velocity_in_local_frame)
-  {
-    state.positions.resize(6, 0.0);
-  }
-  else
-  {
-    // convert quaterion to euler angles
-    std::array<double, 3> orientation_angles;
-    quaternion_to_rpy(measured_state->pose.pose.orientation, orientation_angles);
-
-    // Assign values from the hardware
-    // Position states always exist
-    state.positions[0] = measured_state->pose.pose.position.x;
-    state.positions[1] = measured_state->pose.pose.position.y;
-    state.positions[2] = measured_state->pose.pose.position.z;
-    state.positions[3] = orientation_angles[0];
-    state.positions[4] = orientation_angles[1];
-    state.positions[5] = orientation_angles[2];
-  }
+  // Assign values from the hardware
+  // Position states always exist
+  state.positions[0] = measured_state->pose.pose.position.x;
+  state.positions[1] = measured_state->pose.pose.position.y;
+  state.positions[2] = measured_state->pose.pose.position.z;
+  state.positions[3] = orientation_angles[0];
+  state.positions[4] = orientation_angles[1];
+  state.positions[5] = orientation_angles[2];
 
   state.velocities[0] = measured_state->twist.twist.linear.x;
   state.velocities[1] = measured_state->twist.twist.linear.y;
@@ -536,55 +574,6 @@ bool CartesianTrajectoryGenerator::read_state_from_hardware(JointTrajectoryPoint
 
   state.accelerations.clear();
   return true;
-}
-
-void CartesianTrajectoryGenerator::write_command_to_hardware(const uint64_t /*period_in_ns*/)
-{
-  // reset position in the last commanded state to be read for trajectory replacement (L214 in JTC)
-  last_commanded_state_.positions.resize(dof_, 0.0);
-
-  control_output_local_ = state_desired_;
-
-  // set values for next hardware write()
-  if (has_position_command_interface_)
-  {
-    if (ctg_params_.velocity_in_local_frame)
-    {
-      // The logic here is:
-      // Assumptions:
-      // - Interpolated position is in local frame
-      // - position is relative movement from the "command to world transformation" since the last
-      //     command is received
-
-      // transform from command into global frame
-      geometry_msgs::msg::Vector3 translation;
-      translation.x = state_desired_.positions[0];
-      translation.y = state_desired_.positions[1];
-      translation.z = state_desired_.positions[2];
-      tf2::doTransform(translation, translation, transform_command_to_world_on_reference_receive_);
-
-      std::array<double, 3> orientation_angles = {
-        state_desired_.positions[3], state_desired_.positions[4], state_desired_.positions[5]};
-      geometry_msgs::msg::Quaternion quaternion_world, quaternion_command;
-      rpy_to_quaternion(orientation_angles, quaternion_command);
-      tf2::doTransform(
-        quaternion_command, quaternion_world, transform_command_to_world_on_reference_receive_);
-      quaternion_to_rpy(quaternion_world, orientation_angles);
-
-      state_desired_.positions = {translation.x,         translation.y,
-                                  translation.z,         orientation_angles[0],
-                                  orientation_angles[1], orientation_angles[2]};
-    }
-    assign_interface_from_point(joint_command_interface_[0], state_desired_.positions);
-  }
-  if (has_velocity_command_interface_)
-  {
-    assign_interface_from_point(joint_command_interface_[1], state_desired_.velocities);
-  }
-  if (has_acceleration_command_interface_)
-  {
-    assign_interface_from_point(joint_command_interface_[2], state_desired_.accelerations);
-  }
 }
 
 void CartesianTrajectoryGenerator::publish_state(
@@ -600,8 +589,7 @@ void CartesianTrajectoryGenerator::publish_state(
   if (cart_state_publisher_->trylock())
   {
     cart_state_publisher_->msg_.header.stamp = time;
-    cart_state_publisher_->msg_.reference_world = *(*reference_world_.readFromRT());
-    cart_state_publisher_->msg_.reference_local = *(*reference_local_.readFromRT());
+    cart_state_publisher_->msg_.reference_input = *(*reference_input_.readFromRT());
 
     auto set_multi_dof_point =
       [&](
@@ -643,7 +631,6 @@ void CartesianTrajectoryGenerator::publish_state(
     set_multi_dof_point(cart_state_publisher_->msg_.feedback, current_state);
     set_multi_dof_point(cart_state_publisher_->msg_.error, state_error);
     set_multi_dof_point(cart_state_publisher_->msg_.output_world, desired_state);
-    set_multi_dof_point(cart_state_publisher_->msg_.output_local, control_output_local_);
 
     cart_state_publisher_->unlockAndPublish();
   }

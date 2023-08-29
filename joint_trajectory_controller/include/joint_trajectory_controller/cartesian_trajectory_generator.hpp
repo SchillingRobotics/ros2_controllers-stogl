@@ -22,7 +22,6 @@
 
 #include "control_msgs/msg/cartesian_trajectory_generator_state.hpp"
 #include "control_msgs/srv/set_dof_limits.hpp"
-#include "geometry_msgs/msg/pose.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "joint_limits/joint_limits.hpp"
 #include "joint_trajectory_controller/joint_trajectory_controller.hpp"
@@ -68,13 +67,15 @@ public:
   controller_interface::CallbackReturn on_activate(
     const rclcpp_lifecycle::State & previous_state) override;
 
+  controller_interface::return_type update(
+    const rclcpp::Time & time, const rclcpp::Duration & period) override;
+
   using ControllerReferenceMsg = trajectory_msgs::msg::MultiDOFJointTrajectoryPoint;
   using ControllerFeedbackMsg = nav_msgs::msg::Odometry;
   using SetLimitsModeSrvType = control_msgs::srv::SetDOFLimits;
 
 protected:
   bool read_state_from_hardware(JointTrajectoryPoint & state) override;
-  void write_command_to_hardware(const uint64_t period_in_ns = 0) override;
 
   using JointTrajectoryPoint = trajectory_msgs::msg::JointTrajectoryPoint;
   JOINT_TRAJECTORY_CONTROLLER_PUBLIC
@@ -87,8 +88,7 @@ protected:
   // Command subscribers and Controller State publisher
   rclcpp::Subscription<ControllerReferenceMsg>::SharedPtr ref_subscriber_ = nullptr;
   rclcpp::Subscription<ControllerReferenceMsg>::SharedPtr ref_subscriber_reliable_ = nullptr;
-  realtime_tools::RealtimeBuffer<std::shared_ptr<ControllerReferenceMsg>> reference_world_;
-  realtime_tools::RealtimeBuffer<std::shared_ptr<ControllerReferenceMsg>> reference_local_;
+  realtime_tools::RealtimeBuffer<std::shared_ptr<ControllerReferenceMsg>> reference_input_;
 
   rclcpp::Subscription<ControllerFeedbackMsg>::SharedPtr feedback_subscriber_ = nullptr;
   realtime_tools::RealtimeBuffer<std::shared_ptr<ControllerFeedbackMsg>> feedback_;
@@ -98,8 +98,6 @@ protected:
   // Parameters from ROS for cartesian_trajectory_generator
   std::shared_ptr<ParamListener> ctg_param_listener_;
   Params ctg_params_;
-
-  trajectory_msgs::msg::JointTrajectoryPoint control_output_local_;
 
 private:
   void reference_callback(const std::shared_ptr<ControllerReferenceMsg> msg);
@@ -114,14 +112,13 @@ private:
   rclcpp::Publisher<CartControllerStateMsg>::SharedPtr cart_publisher_;
   CartStatePublisherPtr cart_state_publisher_;
 
+  // joint limits set at start(configuration) time
   std::vector<joint_limits::JointLimits> configured_joint_limits_;
-
-  // storage of last received measured position to
-  geometry_msgs::msg::Pose last_received_measured_position_;
+  // joint limits modified by user at runtime, set initially to configured limits
+  std::vector<joint_limits::JointLimits> modified_joint_limits_;
 
   std::unique_ptr<tf2_ros::Buffer> p_tf_Buffer_;
   std::unique_ptr<tf2_ros::TransformListener> p_tf_Listener_;
-  geometry_msgs::msg::TransformStamped transform_world_to_command_on_reference_receive_;
   geometry_msgs::msg::TransformStamped transform_command_to_world_on_reference_receive_;
 };
 
