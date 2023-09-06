@@ -1,0 +1,25 @@
+cartesian_trajectory_generator:
+
+  velocity_in_local_frame: {
+    type: bool,
+    default_value: false,
+    description: "This options marks that position feedback is received and output send in global coordinate system, but velocity and accelerations are in the local coordinate system. This is useful when using this controller with mobile robots."
+  }
+
+  world_frame_id: {
+    type: string,
+    read_only: true,
+    description: "Name of the world frame_id.",
+    validation: {
+      not_empty<>: null,
+    }
+  }
+
+  command_frame_id: {
+    type: string,
+    read_only: true,
+    description: "Name of the command frame_id.",
+    validation: {
+      not_empty<>: null,
+    }
+  }
