@@ -192,6 +192,9 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
   cart_state_publisher_->msg_.feedback.transforms.resize(1);
   cart_state_publisher_->msg_.feedback.velocities.resize(1);
   cart_state_publisher_->msg_.feedback.accelerations.resize(1);
+  cart_state_publisher_->msg_.feedback_local.transforms.resize(1);
+  cart_state_publisher_->msg_.feedback_local.velocities.resize(1);
+  cart_state_publisher_->msg_.feedback_local.accelerations.resize(1);
   cart_state_publisher_->msg_.error.transforms.resize(1);
   cart_state_publisher_->msg_.error.velocities.resize(1);
   cart_state_publisher_->msg_.error.accelerations.resize(1);
@@ -258,25 +261,27 @@ void CartesianTrajectoryGenerator::reference_callback(
     // Get current transformation
     try
     {
-      transform_world_to_command_on_reference_receive_ = p_tf_Buffer_->lookupTransform(
-        ctg_params_.command_frame_id, ctg_params_.world_frame_id, rclcpp::Time());
-      transform_command_to_world_on_reference_receive_ = p_tf_Buffer_->lookupTransform(
-        ctg_params_.world_frame_id, ctg_params_.command_frame_id, rclcpp::Time());
+      transform_world_to_command_on_reference_receive_.writeFromNonRT(p_tf_Buffer_->lookupTransform(
+        ctg_params_.command_frame_id, ctg_params_.world_frame_id, rclcpp::Time()));
+      transform_command_to_world_on_reference_receive_.writeFromNonRT(p_tf_Buffer_->lookupTransform(
+        ctg_params_.world_frame_id, ctg_params_.command_frame_id, rclcpp::Time()));
     }
     catch (const tf2::TransformException & ex)
     {
-      RCLCPP_ERROR_SKIPFIRST_THROTTLE(
-        get_node()->get_logger(), *(get_node()->get_clock()), 5000, "%s", ex.what());
+      // RCLCPP_ERROR_SKIPFIRST_THROTTLE(
+      //   get_node()->get_logger(), *(get_node()->get_clock()), 5000, "%s", ex.what());
+      RCLCPP_ERROR(get_node()->get_logger(), "%s", ex.what());
     }
     // transform from world to command frame
     tf2::doTransform(
       msg->transforms[0].translation, msg->transforms[0].translation,
-      transform_world_to_command_on_reference_receive_);
+      *(transform_world_to_command_on_reference_receive_.readFromRT()));
 
     geometry_msgs::msg::Quaternion quaternion_world, quaternion_command;
     rpy_to_quaternion(orientation_angles, quaternion_world);
     tf2::doTransform(
-      quaternion_world, quaternion_command, transform_world_to_command_on_reference_receive_);
+      quaternion_world, quaternion_command,
+      *(transform_world_to_command_on_reference_receive_.readFromRT()));
     quaternion_to_rpy(quaternion_command, orientation_angles);
 
     msg->transforms[0].rotation.x = orientation_angles[0];
@@ -557,32 +562,94 @@ void CartesianTrajectoryGenerator::write_command_to_hardware(const uint64_t /*pe
       //     command is received
 
       // transform from command into global frame
-      geometry_msgs::msg::Vector3 translation;
+      geometry_msgs::msg::Vector3 translation, translation_world;
       translation.x = state_desired_.positions[0];
       translation.y = state_desired_.positions[1];
       translation.z = state_desired_.positions[2];
-      tf2::doTransform(translation, translation, transform_command_to_world_on_reference_receive_);
+      tf2::doTransform(
+        translation, translation_world,
+        *(transform_command_to_world_on_reference_receive_.readFromRT()));
+
+      RCLCPP_WARN(
+        get_node()->get_logger(),
+        "Transform command to world on ref receive has values: "
+        "%f, %f, %f",
+        transform_command_to_world_on_reference_receive_.readFromRT()->transform.translation.x,
+        transform_command_to_world_on_reference_receive_.readFromRT()->transform.translation.y,
+        transform_command_to_world_on_reference_receive_.readFromRT()->transform.translation.z);
+      RCLCPP_WARN(
+        get_node()->get_logger(),
+        "Before Transform command values are: "
+        "%f, %f, %f",
+        state_desired_.positions[0], state_desired_.positions[1], state_desired_.positions[2]);
+      RCLCPP_WARN(
+        get_node()->get_logger(),
+        "After Transform command values are: "
+        "%f, %f, %f",
+        translation_world.x, translation_world.y, translation_world.z);
 
       std::array<double, 3> orientation_angles = {
         state_desired_.positions[3], state_desired_.positions[4], state_desired_.positions[5]};
       geometry_msgs::msg::Quaternion quaternion_world, quaternion_command;
       rpy_to_quaternion(orientation_angles, quaternion_command);
       tf2::doTransform(
-        quaternion_command, quaternion_world, transform_command_to_world_on_reference_receive_);
+        quaternion_command, quaternion_world,
+        *(transform_command_to_world_on_reference_receive_.readFromRT()));
       quaternion_to_rpy(quaternion_world, orientation_angles);
 
       state_desired_.positions = {translation.x,         translation.y,
                                   translation.z,         orientation_angles[0],
                                   orientation_angles[1], orientation_angles[2]};
+
+      RCLCPP_WARN(
+        get_node()->get_logger(),
+        "Before Transform angles are: "
+        "%f, %f, %f",
+        state_desired_.positions[3], state_desired_.positions[4], state_desired_.positions[5]);
+      RCLCPP_WARN(
+        get_node()->get_logger(),
+        "After Transform angles are: "
+        "%f, %f, %f",
+        orientation_angles[0], orientation_angles[1], orientation_angles[2]);
     }
     assign_interface_from_point(joint_command_interface_[0], state_desired_.positions);
   }
+
+  auto transform_command_to_world =
+    [&](std::vector<double> & to_transform, const size_t start_index)
+  {
+    // transform and calculate velocities
+    // https://answers.ros.org/question/192273/how-to-implement-velocity-transformation/
+    // https://docs.ros.org/en/hydro/api/tf/html/c++/transform__listener_8cpp_source.html
+    geometry_msgs::msg::Vector3 vector;
+    vector.x = to_transform[start_index + 0];
+    vector.y = to_transform[start_index + 1];
+    vector.z = to_transform[start_index + 2];
+
+    tf2::doTransform(
+      vector, vector, *(transform_command_to_world_on_reference_receive_.readFromRT()));
+
+    to_transform[start_index + 0] = vector.x;
+    to_transform[start_index + 1] = vector.y;
+    to_transform[start_index + 2] = vector.z;
+  };
+
   if (has_velocity_command_interface_)
   {
+    if (ctg_params_.velocity_in_local_frame)
+    {
+      transform_command_to_world(state_desired_.velocities, 0);
+      transform_command_to_world(state_desired_.velocities, 3);
+    }
     assign_interface_from_point(joint_command_interface_[1], state_desired_.velocities);
   }
   if (has_acceleration_command_interface_)
   {
+    if (ctg_params_.velocity_in_local_frame)
+    {
+      transform_command_to_world(state_desired_.accelerations, 0);
+      transform_command_to_world(state_desired_.accelerations, 3);
+    }
     assign_interface_from_point(joint_command_interface_[2], state_desired_.accelerations);
   }
 }
@@ -640,10 +707,23 @@ void CartesianTrajectoryGenerator::publish_state(
       }
     };
 
-    set_multi_dof_point(cart_state_publisher_->msg_.feedback, current_state);
+    // set_multi_dof_point(cart_state_publisher_->msg_.feedback, *(feedback_.readFromRT()));
+
+    set_multi_dof_point(cart_state_publisher_->msg_.feedback_local, current_state);
     set_multi_dof_point(cart_state_publisher_->msg_.error, state_error);
     set_multi_dof_point(cart_state_publisher_->msg_.output_world, desired_state);
     set_multi_dof_point(cart_state_publisher_->msg_.output_local, control_output_local_);
+
+    const auto measured_state = *(feedback_.readFromRT());
+    cart_state_publisher_->msg_.feedback.transforms[0].translation.x =
+      measured_state->pose.pose.position.x;
+    cart_state_publisher_->msg_.feedback.transforms[0].translation.y =
+      measured_state->pose.pose.position.y;
+    cart_state_publisher_->msg_.feedback.transforms[0].translation.z =
+      measured_state->pose.pose.position.z;
+    cart_state_publisher_->msg_.feedback.transforms[0].rotation =
+      measured_state->pose.pose.orientation;
+    cart_state_publisher_->msg_.feedback.velocities[0] = measured_state->twist.twist;
 
     cart_state_publisher_->unlockAndPublish();
   }

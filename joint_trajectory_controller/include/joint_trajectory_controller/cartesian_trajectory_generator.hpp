@@ -121,8 +121,10 @@ private:
 
   std::unique_ptr<tf2_ros::Buffer> p_tf_Buffer_;
   std::unique_ptr<tf2_ros::TransformListener> p_tf_Listener_;
-  geometry_msgs::msg::TransformStamped transform_world_to_command_on_reference_receive_;
-  geometry_msgs::msg::TransformStamped transform_command_to_world_on_reference_receive_;
+  realtime_tools::RealtimeBuffer<geometry_msgs::msg::TransformStamped>
+    transform_world_to_command_on_reference_receive_;
+  realtime_tools::RealtimeBuffer<geometry_msgs::msg::TransformStamped>
+    transform_command_to_world_on_reference_receive_;
 };
 
 }  // namespace cartesian_trajectory_generator
