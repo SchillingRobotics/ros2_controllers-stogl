@@ -115,6 +115,9 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
     "~/reference_reliable", subscribers_reliable_qos,
     std::bind(&CartesianTrajectoryGenerator::reference_callback, this, std::placeholders::_1));
 
+  ref_publisher_ = get_node()->create_publisher<ControllerReferenceMsg>(
+    "~/reference_pub", qos_best_effort_history_depth_one);
+
   std::shared_ptr<ControllerReferenceMsg> msg = std::make_shared<ControllerReferenceMsg>();
   reset_controller_reference_msg(msg);
   reference_world_.writeFromNonRT(msg);
@@ -175,8 +178,7 @@ controller_interface::CallbackReturn CartesianTrajectoryGenerator::on_configure(
 void CartesianTrajectoryGenerator::reference_callback(
   const std::shared_ptr<ControllerReferenceMsg> msg)
 {
-  // store input ref for later use
-  reference_world_.writeFromNonRT(msg);
+  if (ref_publisher_) ref_publisher_->publish(*msg);
 
   // assume for now that we are working with trajectories with one point - we don't know exactly
   // where we are in the trajectory before sampling - nevertheless this should work for the use case
@@ -225,6 +227,9 @@ void CartesianTrajectoryGenerator::reference_callback(
     msg->transforms[0].rotation.z, msg->velocities[0].angular.z, params_.joints[5], 5);
 
   add_new_trajectory_msg(new_traj_msg);
+
+  // store input ref for later use
+  reference_world_.writeFromNonRT(msg);
 }
 
 void CartesianTrajectoryGenerator::set_joint_limits_service_callback(
