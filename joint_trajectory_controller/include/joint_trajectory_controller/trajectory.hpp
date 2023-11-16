@@ -18,8 +18,8 @@
 #include <memory>
 #include <vector>
 
-#include "joint_limits/joint_limits.hpp"
 #include "joint_limits/joint_limiter_interface.hpp"
+#include "joint_limits/joint_limits.hpp"
 #include "joint_trajectory_controller/interpolation_methods.hpp"
 #include "joint_trajectory_controller/visibility_control.h"
 #include "rclcpp/time.hpp"
@@ -122,11 +122,7 @@ public:
   bool interpolate_between_points(
     const rclcpp::Time & time_a, const trajectory_msgs::msg::JointTrajectoryPoint & state_a,
     const rclcpp::Time & time_b, const trajectory_msgs::msg::JointTrajectoryPoint & state_b,
-    const rclcpp::Time & sample_time, const bool do_ruckig_smoothing, const bool skip_splines,
-    trajectory_msgs::msg::JointTrajectoryPoint & output, const rclcpp::Duration & period,
-    trajectory_msgs::msg::JointTrajectoryPoint & splines_state,
-    trajectory_msgs::msg::JointTrajectoryPoint & ruckig_state,
-    trajectory_msgs::msg::JointTrajectoryPoint & ruckig_input_state);
+    const rclcpp::Time & sample_time, trajectory_msgs::msg::JointTrajectoryPoint & output);
 
   JOINT_TRAJECTORY_CONTROLLER_PUBLIC
   TrajectoryPointConstIter begin() const;
